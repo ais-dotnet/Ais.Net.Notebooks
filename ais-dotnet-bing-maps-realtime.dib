@@ -1,0 +1,289 @@
+#!markdown
+
+# AIS.Net Geofence Demo
+
+This is a sample using [endjin's](https://endjin.com) open source [AIS.Net libraries](https://github.com/ais-dotnet/) to demonstrate how you can ingest, decode and display Automatic Identification System (AIS) [AIVDM/AIVDO](https://gpsd.gitlab.io/gpsd/AIVDM.html) NMEA messages from the Norwegian Coastal Administration's marine network (available under [Norwegian license for public data (NLOD)](https://data.norge.no/nlod/en/2.0)) to view real-time vessel positions.
+
+#!markdown
+
+## Set Up Ais.Net Receiver
+
+Pull in the Ais.Net NuGet packages.
+
+#!csharp
+
+#r "nuget:Ais.Net.Receiver"
+#r "nuget:Ais.Net.Models"
+
+#!markdown
+
+Create an AIS Receiver listening to the Norwegian Costal Administration AIS network.
+
+#!csharp
+
+using Ais.Net;
+using Ais.Net.Models;
+using Ais.Net.Models.Abstractions;
+using Ais.Net.Receiver.Configuration;
+using Ais.Net.Receiver.Receiver;
+
+using Microsoft.DotNet.Interactive;
+using Microsoft.DotNet.Interactive.Commands;
+
+using System.Reactive; 
+using System.Reactive.Linq;
+using System.Threading;
+
+#!markdown
+
+You can choose to run the notebook from the live Norwegian Data Stream:
+
+#!csharp
+
+INmeaReceiver receiver = new NetworkStreamNmeaReceiver(host: "153.44.253.27", port: 5631, retryAttemptLimit: 100, retryPeriodicity: TimeSpan.Parse("00:00:00:00.500"));
+
+#!markdown
+
+Or from a data file containing a capture:
+
+#!csharp
+
+INmeaReceiver receiver = new FileStreamNmeaReceiver("data/nmea-ais/raw/2021/03/01.nm4", TimeSpan.FromMilliseconds(1));
+
+#!csharp
+
+var receiverHost = new ReceiverHost(receiver);
+
+#!markdown
+
+## Set up Bing Maps
+
+#!markdown
+
+We register a client side command handler which will execute the UpdateVesselPosition JavaScript function when invoked.
+
+#!javascript
+
+kernel.root.findKernelByName("javascript").registerCommandHandler({commandType: 'VesselPositionCommand', handle: c => {
+    console.log(c.commandEnvelope);
+    UpdateVesselPosition(c.commandEnvelope.command);
+}});
+
+#!markdown
+
+We create a Bing Map widget with custom functions that add vessels via custom pushpins. You will need to [get your own Bing Maps developer API Key](https://docs.microsoft.com/en-us/bingmaps/getting-started/bing-maps-dev-center-help/getting-a-bing-maps-key) and add that in the credentials below:
+
+#!html
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title></title>
+    <meta charset="utf-8" />
+    <script type='text/javascript'
+            src='http://www.bing.com/api/maps/mapcontrol?callback=GetMap' 
+            async defer></script>
+    <script type='text/javascript'>
+        var map;
+
+        function UpdateVesselPosition(position) {
+
+            var pin = getPushpinById(position.mmsi);
+            var loc = new Microsoft.Maps.Location(position.lat, position.lon);
+
+            if (pin == null)
+            {
+                var pin = new Microsoft.Maps.Pushpin(loc, {
+                                icon: createArrow(position.courseOverGroundDegrees, position.color),
+                                title: position.name,
+                                subTitle: position.mmsi
+                            });
+                            
+                pin.metadata = {
+                    id: position.mmsi
+                };
+
+                map.entities.push(pin);
+            }
+            else
+            {
+                pin.setLocation(loc);
+            }
+        }
+
+        function GetMap()
+        {
+            map = new Microsoft.Maps.Map('#myMap', {
+                credentials: "ADD YOUR BING MAPS API KEY"
+            });
+
+            map.setView({ center: map.getCenter(), zoom: 3 });
+        }
+
+        function createArrow(heading, hexColor) {
+            var c = document.createElement('canvas');
+            c.width = 24;
+            c.height = 24;
+
+            var ctx = c.getContext('2d');
+        
+            //Offset the canvas such that we will rotate around the center of our arrow
+            ctx.translate(c.width * 0.5, c.height * 0.5);
+
+            //Rotate the canvas by the desired heading
+            ctx.rotate(heading * Math.PI / 180);
+
+            //Return the canvas offset back to it's original position
+            ctx.translate(-c.width * 0.5, -c.height * 0.5);
+        
+            ctx.fillStyle = hexColor;
+
+            //Draw a path in the shape of an arrow.
+            ctx.beginPath();
+            ctx.moveTo(12, 0);
+            ctx.lineTo(5, 20);
+            ctx.lineTo(12, 15);
+            ctx.lineTo(19, 20);
+            ctx.lineTo(12, 0);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            //Generate the base64 image URL from the canvas.
+            return c.toDataURL();
+        }
+
+        function getPushpinById(id) 
+        {
+            console.log("find " + id);
+            var pin;
+            for (i = 0; i < map.entities.getLength(); i++) {
+                pin = map.entities.get(i);
+
+                if(pin.metadata && pin.metadata.id === id){
+                    return pin;
+                }
+            }
+        }
+    </script>
+    <style>
+        #myMap {
+            position: relative;
+            width: 100%;
+            height: 800px;
+        }
+    </style>
+</head>
+<body>
+    <div id="myMap"></div>
+</body>
+</html>
+
+#!markdown
+
+We create a .NET server side Kernel command for passing new vessel positions to the client side Kernel.
+
+#!csharp
+
+public class VesselPositionCommand : KernelCommand
+{
+    public VesselPositionCommand(): base("javascript"){}
+
+    public double Lon { get;set; }
+    public double Lat { get;set; }
+    public float CourseOverGroundDegrees { get;set; }
+    public string Mmsi { get;set; }
+    public string Name { get;set; }
+    public string Color { get;set; }
+}
+
+#!csharp
+
+var jsKernel = Kernel.Root.FindKernel("javascript");
+jsKernel.RegisterCommandType<VesselPositionCommand>();
+
+#!markdown
+
+## Create the Rx Query
+
+Use Rx's operators to multiplex the AIS Message Types 1,2,3,5, 18, 19, 24 containing all the different values we need for visualisation. We use the .NET Interfaces applied to the Record types to expose properties as higher level concepts like `IVesselNavigation` and `IVesselName` for ease of higher order programming constructs. 
+
+#!csharp
+
+IObservable<IGroupedObservable<uint, IAisMessage>> byVessel = receiverHost.Messages.GroupBy(m => m.Mmsi);
+
+var vesselNavigationWithNameStream =
+    from perVesselMessages in byVessel
+    let vesselNavigationUpdates = perVesselMessages.OfType<IVesselNavigation>()
+    let vesselNames = perVesselMessages.OfType<IVesselName>()
+    let shipTypes = perVesselMessages.OfType<IShipType>()
+    let vesselLocationsWithNames = Observable.CombineLatest(vesselNavigationUpdates, vesselNames, shipTypes, (navigation, name, shipType) => (navigation, name, shipType))
+    from vesselLocationAndName in vesselLocationsWithNames
+    select (mmsi: perVesselMessages.Key, vesselLocationAndName.navigation, vesselLocationAndName.name, vesselLocationAndName.shipType.ShipType);
+
+#!markdown
+
+Add a helper method to colourize different vessel types
+
+#!csharp
+
+private static string ToHex(ShipTypeCategory shipTypeCategory)
+{
+    return shipTypeCategory switch
+    {
+        ShipTypeCategory.NotAvailable => "#96F9A1",
+        ShipTypeCategory.Reserved => "#1C79F0",
+        ShipTypeCategory.WingInGround => "#F8BA97",
+        ShipTypeCategory.SpecialCategory3 => "#F8B594",
+        ShipTypeCategory.HighSpeedCraft => "#FFFF55",
+        ShipTypeCategory.SpecialCategory5 => "#43FFFF",
+        ShipTypeCategory.Passenger => "#203DB3",
+        ShipTypeCategory.Cargo => "#97F9A1",
+        ShipTypeCategory.Tanker => "#FF464E",
+        ShipTypeCategory.Other => "#56FFFF",
+        _ => "#96F9A1",
+    };
+}
+
+#!markdown
+
+## Create the Rx Subscription
+
+We subscribe to the observable stream, deconstruct the incoming position and convert it to a command which can be send via the server side Kernel to the client side Kernel.
+
+#!csharp
+
+vesselNavigationWithNameStream.Subscribe(navigationWithName =>
+{
+    (uint mmsi, IVesselNavigation navigation, IVesselName name, ShipType shipType) = navigationWithName;
+
+    jsKernel.SendAsync(new VesselPositionCommand
+    { 
+        Lat = navigation.Position.Latitude, 
+        Lon = navigation.Position.Longitude,
+        CourseOverGroundDegrees = navigation.CourseOverGroundDegrees ?? 0,
+        Mmsi = mmsi.ToString(),
+        Name = name.VesselName.CleanVesselName(),
+        Color = ToHex(shipType.ToShipTypeCategory())
+    }, 
+    System.Threading.CancellationToken.None);
+});
+
+#!markdown
+
+## Start to ingest the AIS Data
+
+To start processing data, start the long running AIS Receiver Host.
+
+#!csharp
+
+var cts = new CancellationTokenSource();
+var task = receiverHost.StartAsync(cts.Token);
+
+#!markdown
+
+If you want to cancel the long running process, use the CancellationTokenSource.
+
+#!csharp
+
+cts.Cancel();
