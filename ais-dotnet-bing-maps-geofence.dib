@@ -1,3 +1,7 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"name":"csharp"},{"aliases":["js"],"languageName":"JavaScript","name":"javascript"}]}}
+
 #!markdown
 
 # AIS.Net Geofence Demo
@@ -225,7 +229,7 @@ public class VesselPositionCommand : KernelCommand
 
 #!csharp
 
-var jsKernel = Kernel.Root.FindKernel("javascript");
+var jsKernel = Kernel.Root.FindKernelByName("javascript");
 jsKernel.RegisterCommandType<VesselPositionCommand>();
 
 #!markdown
